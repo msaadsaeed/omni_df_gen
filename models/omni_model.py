@@ -18,6 +18,7 @@ Pipeline summary
 All three heads are computed every forward pass.
 Modality masks (ma, mv) control whether real or generated features are used
 in the fusion step; they default to 1 (both present) for training.
+This is using the NLL Loss.
 """
 
 from __future__ import annotations
