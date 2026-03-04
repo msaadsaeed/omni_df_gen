@@ -1,3 +1,4 @@
 checkpoints/
 *.ckpt
 logs/
+*.pyc

@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File (with args)",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "python": "/home/umflint.edu/msaads/miniconda3/envs/omni/bin/python",
+            "args": [
+                "--root_dir", "/data/saad/datasets/audiovideo/fakeavceleb_processed/",
+                "--log_dir", "./debug_logs",
+                "--exp_name", "debug_run",
+                "--ckpt_dir", "./debug_checkpoints",
+                "--batch_size", "8",
+                "--num_workers", "4",
+                "--gpus", "1",
+                "--precision", "16-mixed",
+                "--seed", "42"
+            ]
+        }
+    ]
+}
