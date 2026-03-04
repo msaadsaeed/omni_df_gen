@@ -1,3 +1,7 @@
 checkpoints/
 *.ckpt
 logs/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
