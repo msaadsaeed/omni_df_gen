@@ -5,31 +5,39 @@ PyTorch Lightning Module wrapping OmniDeepfakeModel.
 
 Training strategy
 ─────────────────
-  Phase 1  (warm-up, default first ~10% of steps):
+  Phase 1  (warm-up):
     Backbone parameters frozen; only projection heads, generators,
     fusion, and detection head are trained.
 
   Phase 2  (gradual unfreeze):
-    Periodically unfreeze the top-k transformer layers in both
-    audio and video backbones (configurable via unfreeze_top_k_at_epoch).
+    At --unfreeze_at_epoch, the top-k transformer layers in both
+    audio and video backbones are unfrozen.
+
+Modality dropout
+─────────────────
+  During training, each batch has a probability of having one modality
+  zeroed out (set to None) to simulate missing-modality conditions:
+
+    p_drop  (default 0.15)
+    → ~15 % of batches: audio dropped  (model must generate audio from video)
+    → ~15 % of batches: video dropped  (model must generate video from audio)
+    → ~70 % of batches: both present   (normal training)
+
+  The classification loss backpropagates through the generator during
+  single-modality batches, teaching it to produce discriminatively useful
+  imputed features rather than merely reconstruction-faithful ones.
 
 Optimiser
 ─────────
-  AdamW with weight decay.
-  Separate parameter groups:
+  AdamW with weight decay.  Separate parameter groups:
     - backbone params : lower LR  (backbone_lr_scale × base_lr)
     - all other params: base_lr
-
   OneCycleLR scheduler with cosine annealing.
-
-Logging
-───────
-  All loss components and accuracy/AUC metrics are logged to the
-  Lightning logger (TensorBoard / W&B depending on Trainer config).
 """
 
 from __future__ import annotations
 
+import random
 from typing import Dict, List, Optional
 
 import torch
@@ -53,8 +61,9 @@ class OmniDeepfakeLitModel(pl.LightningModule):
         lambda_audio/video/av  : classification loss weights
         lambda_rec             : reconstruction NLL weight
         label_smoothing        : cross-entropy label smoothing
-        unfreeze_top_k_layers  : unfreeze top-k backbone transformer layers
-                                 when this epoch is reached (None = never)
+        modal_dropout_p        : per-batch probability of dropping each modality
+                                 (e.g. 0.15 → 15% audio-only, 15% video-only batches)
+        unfreeze_top_k_layers  : unfreeze top-k backbone transformer layers at epoch
         unfreeze_at_epoch      : epoch at which to call unfreeze
         freeze_backbones       : start with frozen backbones
         model_kwargs           : forwarded to OmniDeepfakeModel.__init__
@@ -71,6 +80,7 @@ class OmniDeepfakeLitModel(pl.LightningModule):
         lambda_av:          float = 1.0,
         lambda_rec:         float = 0.1,
         label_smoothing:    float = 0.05,
+        modal_dropout_p:    float = 0.15,
         unfreeze_top_k_layers: Optional[int] = 2,
         unfreeze_at_epoch:  int   = 5,
         freeze_backbones:   bool  = True,
@@ -92,11 +102,12 @@ class OmniDeepfakeLitModel(pl.LightningModule):
             label_smoothing=label_smoothing,
         )
 
-        self.lr                   = lr
-        self.weight_decay         = weight_decay
-        self.backbone_lr_scale    = backbone_lr_scale
+        self.lr                    = lr
+        self.weight_decay          = weight_decay
+        self.backbone_lr_scale     = backbone_lr_scale
+        self.modal_dropout_p       = modal_dropout_p
         self.unfreeze_top_k_layers = unfreeze_top_k_layers
-        self.unfreeze_at_epoch    = unfreeze_at_epoch
+        self.unfreeze_at_epoch     = unfreeze_at_epoch
 
         # Epoch-level accumulators for AUC computation
         self._val_acc  = EvalAccumulator()
@@ -122,29 +133,63 @@ class OmniDeepfakeLitModel(pl.LightningModule):
                 on_step=False, on_epoch=True,
             )
 
+    # ── Modality dropout ──────────────────────────────────────────────────
+
+    def _apply_modal_dropout(self, batch: Dict) -> Dict:
+        """
+        Randomly drop one modality from the batch during training to simulate
+        missing-modality conditions and force the generators to learn imputation.
+
+        Probability breakdown (with default p=0.15):
+          15%  → audio set to None  (video-only batch)
+          15%  → video set to None  (audio-only batch)
+          70%  → both kept          (normal full-AV batch)
+
+        Returns a new dict (original not mutated) with the dropped modality
+        key set to None and its lengths key removed.
+        """
+        p = self.modal_dropout_p
+        if p <= 0:
+            return batch
+
+        r = random.random()
+        if r < p:
+            # Drop audio — model must generate it from video
+            batch = dict(batch)
+            batch["audio"]         = None
+            batch.pop("audio_lengths", None)
+        elif r < 2 * p:
+            # Drop video — model must generate it from audio
+            batch = dict(batch)
+            batch["video"]         = None
+            batch.pop("video_lengths", None)
+
+        return batch
+
     # ── Core step ─────────────────────────────────────────────────────────
 
     def _step(self, batch: Dict, stage: str) -> torch.Tensor:
         outputs = self.model(batch)
         losses  = self.criterion(outputs, batch)
 
-        # Log all loss components
         on_step = stage == "train"
+        bs = (
+            batch["audio"].size(0) if batch.get("audio") is not None
+            else batch["video"].size(0)
+        )
 
+        # Log reconstruction losses (will be 0 when a modality was dropped)
         self.log(f"{stage}/rec_a", outputs["rec_loss_a"],
-                 on_step=on_step, on_epoch=True,
-                 batch_size=batch["audio"].size(0))
+                 on_step=on_step, on_epoch=True, batch_size=bs)
         self.log(f"{stage}/rec_v", outputs["rec_loss_v"],
-                 on_step=on_step, on_epoch=True,
-                 batch_size=batch["audio"].size(0))
+                 on_step=on_step, on_epoch=True, batch_size=bs)
 
         self.log_dict(
             {f"{stage}/{k}": v for k, v in losses.items()},
             on_step=on_step, on_epoch=True, prog_bar=(stage == "train"),
-            batch_size=batch["audio"].size(0),
+            batch_size=bs,
         )
 
-        # Log step-level accuracy (lightweight, no AUC)
         for task, logits_key, label_key in [
             ("audio", "logits_audio", "audio_label"),
             ("video", "logits_video", "video_label"),
@@ -154,7 +199,7 @@ class OmniDeepfakeLitModel(pl.LightningModule):
             self.log(
                 f"{stage}/acc_{task}", acc,
                 on_step=on_step, on_epoch=True, prog_bar=True,
-                batch_size=batch["audio"].size(0),
+                batch_size=bs,
             )
 
         return losses["total"]
@@ -162,9 +207,12 @@ class OmniDeepfakeLitModel(pl.LightningModule):
     # ── Train / val / test ────────────────────────────────────────────────
 
     def training_step(self, batch: Dict, batch_idx: int) -> torch.Tensor:
+        # Apply modality dropout before forward pass
+        batch = self._apply_modal_dropout(batch)
         return self._step(batch, "train")
 
     def validation_step(self, batch: Dict, batch_idx: int) -> None:
+        # Validation always uses both modalities (no dropout)
         outputs = self.model(batch)
         self._step(batch, "val")
         self._val_acc.update(
@@ -203,7 +251,6 @@ class OmniDeepfakeLitModel(pl.LightningModule):
             on_step=False, on_epoch=True,
         )
         self._test_acc.reset()
-        # Print a summary table to stdout
         print("\n── Test Results ─────────────────────────────")
         for k, v in sorted(metrics.items()):
             print(f"  {k:<30} {v:.4f}")
@@ -214,9 +261,11 @@ class OmniDeepfakeLitModel(pl.LightningModule):
     def predict_step(self, batch: Dict, batch_idx: int) -> Dict:
         """
         Returns softmax probabilities for all three task heads.
-        To run single-modality inference:
-            batch["ma"] = torch.zeros(B)   # disable audio
-            batch["mv"] = torch.ones(B)    # keep video
+
+        Supports missing-modality inference:
+            batch["audio"] = None   → audio-only mode (video generated)
+            batch["video"] = None   → video-only mode (audio generated)
+            (both present)          → full AV mode
         """
         outputs = self.model(batch)
         return {
@@ -241,7 +290,7 @@ class OmniDeepfakeLitModel(pl.LightningModule):
         backbone_trainable = [p for p in backbone_params if p.requires_grad]
 
         param_groups: List[Dict] = [
-            {"params": other_params,       "lr": self.lr},
+            {"params": other_params, "lr": self.lr},
         ]
         if backbone_trainable:
             param_groups.append(

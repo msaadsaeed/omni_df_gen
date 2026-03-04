@@ -97,6 +97,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--facenet_pretrained", type=str,   default="vggface2")
     p.add_argument("--no_freeze",          action="store_true",
                    help="Disable backbone freezing (not recommended from scratch)")
+    p.add_argument("--modal_dropout_p",    type=float, default=0.15,
+                   help="Per-batch probability of dropping each modality during training "
+                        "(e.g. 0.15 → ~15%% audio-only + 15%% video-only batches). "
+                        "Set 0 to disable. Teaches generators to impute missing modalities.")
     p.add_argument("--unfreeze_top_k",     type=int,   default=2,
                    help="Unfreeze top-k backbone layers at --unfreeze_at_epoch")
     p.add_argument("--unfreeze_at_epoch",  type=int,   default=5)
@@ -170,6 +174,7 @@ def main() -> None:
         lambda_av             = args.lambda_av,
         lambda_rec            = args.lambda_rec,
         label_smoothing       = args.label_smoothing,
+        modal_dropout_p       = args.modal_dropout_p,
         unfreeze_top_k_layers = args.unfreeze_top_k,
         unfreeze_at_epoch     = args.unfreeze_at_epoch,
         freeze_backbones      = not args.no_freeze,

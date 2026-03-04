@@ -101,7 +101,7 @@ class CrossModalGenerator(nn.Module):
         )
 
         # Output heads
-        self.feat_head    = nn.Linear(d_model, d_model)
+        self.feat_head    = nn.Linear(d_model, d_model) # add activation layer 
         self.logvar_head  = nn.Linear(d_model, d_model)
 
     def forward(

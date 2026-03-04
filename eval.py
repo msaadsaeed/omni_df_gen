@@ -86,6 +86,26 @@ def _device(args) -> torch.device:
 # Test mode  (Lightning Trainer)
 # ---------------------------------------------------------------------------
 
+def _apply_modality_mask(batch: dict, modality: str) -> dict:
+    """
+    Strip the absent modality so the model uses cross-modal generation.
+
+    modality='av'    → return unchanged
+    modality='audio' → remove video (model generates video from audio)
+    modality='video' → remove audio (model generates audio from video)
+    """
+    if modality == "av":
+        return batch
+    batch = dict(batch)
+    if modality == "audio":
+        batch["video"]         = None
+        batch.pop("video_lengths", None)
+    else:  # video
+        batch["audio"]         = None
+        batch.pop("audio_lengths", None)
+    return batch
+
+
 def run_test(args: argparse.Namespace) -> None:
     """Evaluate a checkpoint on the test split using Lightning Trainer."""
     pl.seed_everything(args.seed)
@@ -213,6 +233,8 @@ def run_detailed_eval(args: argparse.Namespace) -> None:
                 k: v.to(device) for k, v in batch.items()
                 if isinstance(v, torch.Tensor)
             }
+            # Apply single-modality restriction if requested
+            tensor_batch = _apply_modality_mask(tensor_batch, getattr(args, "modality", "av"))
             outputs = lit.model(tensor_batch)
 
             # Accumulate for final epoch-level metrics
@@ -367,6 +389,11 @@ def parse_args() -> argparse.Namespace:
     test_p.add_argument("--test_csv",  type=str, default="test/metadata.csv")
     test_p.add_argument("--detailed",  action="store_true",
                         help="Show per-class accuracy and AUC breakdown")
+    test_p.add_argument("--modality",  type=str, default="av",
+                        choices=["audio", "video", "av"],
+                        help="Restrict inference to a single modality: "
+                             "'audio' (video generated), 'video' (audio generated), "
+                             "or 'av' (both present, default)")
 
     # predict subcommand
     pred_p = sub.add_parser("predict", help="Run inference on a clip list CSV")
